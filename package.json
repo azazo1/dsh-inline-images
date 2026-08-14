@@ -1,0 +1,43 @@
+{
+  "name": "dsh-inline-images",
+  "description": "对话内联图片:LLM 回复中输出的本地图片路径直接在消息正文内渲染为图片,支持 9 种格式、点击放大灯箱、可调尺寸",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-attachment": "*",
+    "@deepseek-ai/dsh-credentials": "*",
+    "@deepseek-ai/dsh-host-webserver": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/dsh-client-runtime": "*",
+    "@deepseek-ai/dsh-client-ui-slots": "*",
+    "react": "*"
+  }
+}
