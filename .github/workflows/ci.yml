@@ -1,0 +1,47 @@
+# GitHub Actions:推送到 GitHub 后全自动构建 + 校验;打 tag 且配置 NPM_TOKEN 时自动发 npm。
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - run: corepack enable
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm run build
+      - run: node -e "const m=require('./package.json'); if(!m.dsh||!m.dsh.bundle) process.exit(1)"
+      - run: test -f lib/index.js && test -f lib/client.js && test -f cordis.patch.yml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib
+          path: |
+            lib/
+            cordis.patch.yml
+            dsh.plugin.json
+            package.json
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      - run: corepack enable
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm run build
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
