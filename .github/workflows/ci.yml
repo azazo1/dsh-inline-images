@@ -16,7 +16,7 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
       - run: corepack enable
-      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - run: pnpm run build
       - run: node -e "const m=require('./package.json'); if(!m.dsh||!m.dsh.bundle) process.exit(1)"
       - run: test -f lib/index.js && test -f lib/client.js && test -f cordis.patch.yml
@@ -40,7 +40,7 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
       - run: corepack enable
-      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - run: pnpm run build
       - run: npm publish --access public
         env:
