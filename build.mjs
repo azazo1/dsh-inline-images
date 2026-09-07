@@ -81,7 +81,7 @@ function verifyClientBundle() {
   if (typeof plugin?.apply !== 'function') {
     throw new Error('factory 必须返回带 apply 的插件对象')
   }
-  if (!Array.isArray(plugin.inject) || !plugin.inject.includes('slots')) {
-    throw new Error('factory 返回的 inject 必须包含 slots')
+  if (!Array.isArray(plugin.inject) || !plugin.inject.includes('slots') || !plugin.inject.includes('remote')) {
+    throw new Error('factory 返回的 inject 必须包含 slots 和 remote')
   }
 }

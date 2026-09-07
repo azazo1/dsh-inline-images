@@ -143,19 +143,13 @@ window.__ModuleLoader__.load({
     }
 
     async function apply(ctx: any): Promise<void> {
-      const slots = ctx.slots ?? ctx.get('slots')
-      if (slots === undefined) return
+      await ctx.remote.$mount(INLINE_REMOTE_CONTRIBUTION)
 
-      const remote = ctx.remote ?? ctx.get('remote')
-      if (remote !== undefined && typeof remote.$mount === 'function') {
-        await remote.$mount(INLINE_REMOTE_CONTRIBUTION)
-      }
-
-      slots.inject('shell.overlay', () => slots.register(
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register(
         { name: 'shell.overlay', id: 'inline-images-lightbox', order: 100, label: '图片灯箱' },
         () => React.createElement(ImageLightbox, null),
       ))
-      slots.inject('settings.section', () => slots.register(
+      ctx.slots.inject('settings.section', () => ctx.slots.register(
         { name: 'settings.section', id: 'inline-images', order: 35, label: '内联图片' },
         (props: any) => React.createElement(InlineSettings, { ...props, ctx }),
       ))
@@ -185,7 +179,7 @@ window.__ModuleLoader__.load({
 
     return {
       name: PLUGIN_NAME,
-      inject: ['slots'],
+      inject: ['slots', 'remote'],
       apply,
     }
   },
