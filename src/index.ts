@@ -1,6 +1,7 @@
 /**
  * dsh-inline-images host:「对话显示图片」。
  *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<path>(与 Web 页面同源)。
+ *  - token 首次生成后持久化到凭证存储(INLINE_IMAGE_TOKEN), 重启后历史消息中的图片 URL 仍然有效。
  *  - llm/stream 包装:把助手消息文本中的本地图片路径改写为该 URL → 产品 MarkdownText 在消息正文内渲染图片。
  *  - InlineImagesRuntime:Typert Remote 服务(getConfig / setConfig,控制正文图片最大尺寸)。
  */
@@ -18,6 +19,7 @@ export const inject = ['llm']
 const ROUTE_PATH = '/plugins/dsh-inline-images/image'
 const REF_MAX_WIDTH = 'INLINE_IMAGE_MAX_WIDTH'
 const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
+const REF_TOKEN = 'INLINE_IMAGE_TOKEN'
 const IMAGE_FORMATS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif', 'bmp', 'ico']
 
 /* ---------- wire contract ---------- */
@@ -174,7 +176,34 @@ export function apply(ctx: Context): void {
   const attachments = ctx.get('attachments')
   const webServer = ctx.get('webServer')
   const llm = ctx.get('llm')
-  const token = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+  const credentials = ctx.get('credentials')
+
+  // token 持久化: 首次生成后写入凭证存储, 重启复用同一 token, 历史消息中的图片 URL 保持有效
+  let token: string | undefined
+  let tokenPromise: Promise<string> | undefined
+  const getToken = (): Promise<string> => {
+    if (tokenPromise === undefined) {
+      tokenPromise = (async () => {
+        if (credentials !== undefined) {
+          try {
+            const resolved = await credentials.resolve(REF_TOKEN as never)
+            const stored = typeof resolved?.value === 'string' ? resolved.value.trim() : ''
+            if (/^[A-Za-z0-9]{16,128}$/.test(stored)) {
+              token = stored
+              return stored
+            }
+          } catch { /* 读取失败则重新生成 */ }
+        }
+        const fresh = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+        token = fresh
+        if (credentials !== undefined) {
+          try { await credentials.set(REF_TOKEN as never, fresh) } catch { /* 保存失败则本次会话内仍可用 */ }
+        }
+        return fresh
+      })()
+    }
+    return tokenPromise
+  }
 
   // Remote 服务
   const runtime = new InlineImagesRuntime(ctx)
@@ -201,7 +230,10 @@ export function apply(ctx: Context): void {
               try { query[pair.slice(0, eq)] = decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, ' ')) } catch { /* skip */ }
             }
           }
-          if (query.t !== token || !query.p) {
+          if (!query.p) {
+            res.writeHead(400); res.end('bad request'); return
+          }
+          if (query.t !== await getToken()) {
             res.writeHead(400); res.end('bad request'); return
           }
           const mediaType = mediaTypeFor(query.p)
@@ -225,16 +257,17 @@ export function apply(ctx: Context): void {
 
   // llm/stream 包装
   if (llm !== undefined && webServer !== undefined) {
+    void getToken()
     ctx.on('llm/stream', (options: any, next: any) => {
       if (options?.purpose) return next()
-      return rewriteStream(next, webServer.port, token, fs)
+      return rewriteStream(next, webServer.port, getToken, fs)
     })
   }
 
   void runtime
 }
 
-async function* rewriteStream(next: any, port: number, token: string, fs: Context['fs']) {
+async function* rewriteStream(next: any, port: number, getToken: () => Promise<string>, fs: Context['fs']) {
   const seenPaths = new Set<string>()
   for await (const chunk of next()) {
     if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
@@ -255,7 +288,7 @@ async function* rewriteStream(next: any, port: number, token: string, fs: Contex
             } catch {
               continue
             }
-            todo.push({ range, url: 'http://127.0.0.1:' + port + ROUTE_PATH + '?t=' + token + '&p=' + encodeURIComponent(range.path) })
+            todo.push({ range, url: 'http://127.0.0.1:' + port + ROUTE_PATH + '?t=' + await getToken() + '&p=' + encodeURIComponent(range.path) })
           }
           todo.sort((a, b) => b.range.rawStart - a.range.rawStart)
           for (const { range, url } of todo) {
