@@ -1,9 +1,12 @@
 /**
  * dsh-inline-images host: 对话显示图片.
- *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<path> (与 Web 页面同源).
- *  - token 首次生成后持久化到凭证存储 (INLINE_IMAGE_TOKEN), 重启后历史消息中的图片 URL 仍然有效.
- *  - llm/stream 包装: 把助手消息文本中的本地图片路径改写为该 URL, 产品 MarkdownText 在消息正文内渲染图片.
- *  - InlineImagesRuntime: Typert Remote 服务 (getConfig / setConfig, 控制正文图片最大尺寸).
+ *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<绝对路径> (与 Web 页面同源).
+ *  - token 首次生成后持久化到凭证存储 (INLINE_IMAGE_TOKEN), 重启后历史图片 URL 仍然有效.
+ *  - 不改写模型输出: 会话日志只保存模型原始的 ![路径](路径) 文本, 零污染.
+ *  - InlineImagesRuntime.resolveImage: 供前端把 MarkdownText 降级文本替换为授权 URL;
+ *    相对路径按调用方传入的会话工作目录解析.
+ *  - systemPrompt section: 指引模型用 ![路径](路径) 附图.
+ *  - InlineImagesRuntime: Typert Remote 服务 (getConfig / setConfig / resolveImage).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-llm'
@@ -14,15 +17,20 @@ import {
   INLINE_MANIFEST,
   PLUGIN_NAME,
   ROUTE_PATH,
+  type ResolveImageArgs,
+  type ResolveImageResult,
   type SetConfigArgs,
 } from './shared.ts'
 
 export const name = PLUGIN_NAME
-export const inject = ['llm', 'fs', 'webServer']
+export const inject = ['fs', 'webServer']
 
 const REF_MAX_WIDTH = 'INLINE_IMAGE_MAX_WIDTH'
 const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
 const REF_TOKEN = 'INLINE_IMAGE_TOKEN'
+
+const PROMPT_SECTION_NAME = 'plugin:dsh-inline-images'
+const INLINE_IMAGES_PROMPT = 'Inline images in Web chat: to let the user preview a local image file (png/jpg/jpeg/webp/gif/svg/avif/bmp/ico), write the same image path twice as a Markdown image in the reply text, like ![path](path) — the alt text must be the path itself, because the preview is recovered from the visible text. Use an absolute path or a path relative to the session working directory, and only reference image files you have confirmed exist. A bare path in plain text stays plain text.'
 
 function mediaTypeFor(path: string): string | null {
   const lower = path.toLowerCase()
@@ -37,13 +45,53 @@ function mediaTypeFor(path: string): string | null {
   return null
 }
 
-/** Remote service: 正文图片最大尺寸配置. TypertRemoteService 构造时已经 provide(serviceKey). */
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)$/i
+const ABSOLUTE_PATH_RE = /^([A-Za-z]:[\\/]|\\\\|\/)/
+const URL_LIKE_RE = /^(https?:|data:|file:|blob:|mailto:)/i
+const PLACEHOLDER_SEGMENT = /^(路径|示例|占位|本地路径|某某|xx|xxx)$/i
+
+/** 前端候选校验: 图片后缀 + 非 URL + 非占位段. 路径可为绝对或相对. */
+export function isImageCandidatePath(path: string): boolean {
+  if (path.length < 3) return false
+  if (URL_LIKE_RE.test(path)) return false
+  if (!IMAGE_EXT_RE.test(path)) return false
+  if (path.split(/[\\/]/).some(segment => PLACEHOLDER_SEGMENT.test(segment))) return false
+  return true
+}
+
+/** Remote service: 尺寸配置与图片 URL 授权. TypertRemoteService 构造时已经 provide(serviceKey). */
 export class InlineImagesRuntime extends TypertRemoteService {
   private readonly credentials: Context['credentials'] | undefined
+  private readonly fs: Context['fs'] | undefined
+  private readonly webServer: { port: number } | undefined
+  private tokenPromise: Promise<string> | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'inlineImages')
     this.credentials = ctx.get('credentials')
+    this.fs = ctx.get('fs')
+    this.webServer = ctx.get('webServer')
+  }
+
+  /** 取回环 token (惰性初始化, 与 apply 内共享凭证存储). */
+  ensureToken(resolve: (ref: never) => Promise<{ value?: unknown } | undefined>, set: (ref: never, value: string) => Promise<void>): Promise<string> {
+    if (this.tokenPromise === undefined) {
+      this.tokenPromise = (async () => {
+        try {
+          const resolved = await resolve(REF_TOKEN as never)
+          const stored = typeof resolved?.value === 'string' ? resolved.value.trim() : ''
+          if (/^[A-Za-z0-9]{16,128}$/.test(stored)) return stored
+        } catch {
+          /* 读取失败则重新生成 */
+        }
+        const fresh = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+        try { await set(REF_TOKEN as never, fresh) } catch {
+          /* 保存失败则本次会话内仍可用 */
+        }
+        return fresh
+      })()
+    }
+    return this.tokenPromise
   }
 
   async getConfig() {
@@ -79,79 +127,54 @@ export class InlineImagesRuntime extends TypertRemoteService {
     }
     return this.getConfig()
   }
-}
 
-const BARE_STOP = "\\s'\"<>\\[\\]\u3001\uFF0C\u3002\uFF1B;`"
-const PLACEHOLDER_SEGMENT = /^(路径|示例|占位|本地路径|某某|xx|xxx)$/i
-const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)$/i
-
-function normalizeCandidate(raw: string): string {
-  let value = raw.trim()
-  value = value.replace(/^['"`\[(\s]+/, '')
-  value = value.replace(/['"`]+$/, '')
-  value = value.replace(/[\]}>]+$/, '')
-  value = value.replace(/[;,，。、.]+$/, '')
-  return value.trim()
-}
-
-function acceptable(path: string): boolean {
-  if (path.length < 3) return false
-  if (/^(https?:|data:|file:|mailto:)/i.test(path)) return false
-  if (!IMAGE_EXT_RE.test(path)) return false
-  if (!/^([A-Za-z]:[\\/]|\\\\|\/)/.test(path)) return false
-  if (path.split(/[\\/]/).some(segment => PLACEHOLDER_SEGMENT.test(segment))) return false
-  return true
-}
-
-function scanImagePathRanges(text: string): Array<{ path: string; rawStart: number; rawEnd: number }> {
-  const found: Array<{ path: string; rawStart: number; rawEnd: number }> = []
-  const seen = new Set<string>()
-  const push = (raw: string, start: number, end: number) => {
-    const path = normalizeCandidate(raw)
-    if (!acceptable(path)) return
-    if (seen.has(path)) return
-    seen.add(path)
-    found.push({ path, rawStart: start, rawEnd: end })
-  }
-  const mdRe = /!?\[[^\]]*\]\(\s*([^)\s][^)]*?)\s*\)/g
-  let match: RegExpExecArray | null
-  while ((match = mdRe.exec(text)) !== null) {
-    const inner = match[1].trim()
-    const quote = inner[0]
-    const path = quote === '"' || quote === "'"
-      ? (inner.indexOf(quote, 1) !== -1 ? inner.slice(1, inner.indexOf(quote, 1)) : inner)
-      : inner
-    push(path, match.index, match.index + match[0].length)
-  }
-  const bareRe = new RegExp('(?:[A-Za-z]:[\\\\/][^' + BARE_STOP + ']+|\\\\[^\\\\\\s]+[\\\\/][^' + BARE_STOP + ']+|\\/[^' + BARE_STOP + ']+)', 'g')
-  while ((match = bareRe.exec(text)) !== null) {
-    const path = normalizeCandidate(match[0])
-    if (!acceptable(path)) continue
-    let start = match.index
-    let end = match.index + match[0].length
-    if (text[start - 1] === '`' && text[end] === '`') {
-      start -= 1
-      end += 1
+  /**
+   * 前端授权入口: 校验路径指向真实存在的图片文件, 返回同源回环 URL.
+   * 相对路径按 args.cwd (发起会话的工作目录) 解析; 不存在或非法时返回空对象.
+   */
+  async resolveImage(args: ResolveImageArgs): Promise<ResolveImageResult> {
+    const fs = this.fs
+    const webServer = this.webServer
+    if (fs === undefined || webServer === undefined) return {}
+    const raw = args.path.trim()
+    if (!isImageCandidatePath(raw)) return {}
+    if (!ABSOLUTE_PATH_RE.test(raw) && (args.cwd === undefined || args.cwd.trim() === '')) return {}
+    try {
+      const target = await fs.resolve(raw, args.cwd === undefined ? undefined : { cwd: args.cwd })
+      const info = await fs.stat(target)
+      if (info === undefined || info.type !== 'file') return {}
+      const token = this.credentials === undefined
+        ? undefined
+        : await this.ensureToken(
+            ref => this.credentials.resolve(ref),
+            (ref, value) => this.credentials.set(ref, value),
+          )
+      if (token === undefined) return {}
+      return {
+        url: 'http://127.0.0.1:' + webServer.port + ROUTE_PATH + '?t=' + token + '&p=' + encodeURIComponent(target.displayPath),
+      }
+    } catch {
+      return {}
     }
-    if (seen.has(path)) continue
-    seen.add(path)
-    found.push({ path, rawStart: start, rawEnd: end })
   }
-  return found
 }
 
-type TypertRegistry = { register(contribution: unknown): () => void | Promise<void> }
 type ConnectionHandle = { requestRejection(request: { headers: unknown }): 401 | 403 | undefined }
+type TypertRegistry = { register(contribution: unknown): () => void | Promise<void> }
+type SystemPromptRegistry = {
+  getSectionOrder?(name: string): number
+  section(section: { name: string; order: number; text: string }): () => void
+}
 
 export function apply(ctx: Context): void {
   const logger = ctx.logger(PLUGIN_NAME)
   const fs = ctx.get('fs')
   const attachments = ctx.get('attachments')
   const webServer = ctx.get('webServer')
-  const llm = ctx.get('llm')
   const credentials = ctx.get('credentials')
   const connection = ctx.get('connection') as ConnectionHandle | undefined
   const typert = ctx.get('typert') as TypertRegistry | undefined
+  const systemPrompt = ctx.get('systemPrompt') as SystemPromptRegistry | undefined
 
   let token: string | undefined
   let tokenPromise: Promise<string> | undefined
@@ -183,8 +206,27 @@ export function apply(ctx: Context): void {
     return tokenPromise
   }
 
-  new InlineImagesRuntime(ctx)
+  const runtime = new InlineImagesRuntime(ctx)
   if (typert !== undefined) typert.register(INLINE_MANIFEST)
+  // 路由与 resolveImage 共用同一 token 来源: runtime 的惰性初始化落在凭证存储中.
+  runtime.ensureToken(
+    ref => (credentials === undefined ? Promise.resolve(undefined) : credentials.resolve(ref)),
+    (ref, value) => (credentials === undefined ? Promise.resolve() : credentials.set(ref, value)),
+  ).then(fresh => {
+    if (token === undefined) {
+      token = fresh
+      tokenPromise = Promise.resolve(fresh)
+    }
+  }).catch(() => { /* getToken 兜底 */ })
+
+  if (systemPrompt !== undefined) {
+    const order = systemPrompt.getSectionOrder?.('DELIVERABLE_FILE_REFERENCES') ?? 9000
+    ctx.effect(() => systemPrompt.section({
+      name: PROMPT_SECTION_NAME,
+      order,
+      text: INLINE_IMAGES_PROMPT,
+    }), 'dsh-inline-images: prompt section')
+  }
 
   ctx.effect(() => webServer.register({
       kind: 'exact',
@@ -234,60 +276,5 @@ export function apply(ctx: Context): void {
     }), 'dsh-inline-images: image route')
 
   void getToken()
-  ctx.on('llm/stream', (options: any, next: any) => {
-    if (options?.purpose) return next()
-    return rewriteStream(next, webServer.port, getToken, fs, logger)
-  })
-  logger.info('已挂载图片回环路由与 llm/stream 改写')
-}
-
-async function* rewriteStream(
-  next: any,
-  port: number,
-  getToken: () => Promise<string>,
-  fs: Context['fs'],
-  logger: { error(message: string, extra?: unknown): void },
-) {
-  const seenPaths = new Set<string>()
-  for await (const chunk of next()) {
-    if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
-      try {
-        const text = chunk.block.text
-        const ranges = scanImagePathRanges(text)
-        if (ranges.length > 0 && fs !== undefined) {
-          let rewritten = text
-          let changed = false
-          const todo: Array<{ range: { path: string; rawStart: number; rawEnd: number }; url: string }> = []
-          for (const range of ranges) {
-            if (seenPaths.has(range.path)) continue
-            seenPaths.add(range.path)
-            try {
-              const target = await fs.resolve(range.path)
-              const info = await fs.stat(target)
-              if (info === undefined || info.type !== 'file') continue
-            } catch {
-              continue
-            }
-            todo.push({
-              range,
-              url: 'http://127.0.0.1:' + port + ROUTE_PATH + '?t=' + await getToken() + '&p=' + encodeURIComponent(range.path),
-            })
-          }
-          todo.sort((a, b) => b.range.rawStart - a.range.rawStart)
-          for (const { range, url } of todo) {
-            const before = rewritten
-            rewritten = rewritten.slice(0, range.rawStart) + '![](' + url + ')' + rewritten.slice(range.rawEnd)
-            if (rewritten !== before) changed = true
-          }
-          if (changed) {
-            yield { ...chunk, block: { ...chunk.block, text: rewritten } }
-            continue
-          }
-        }
-      } catch (error) {
-        logger.error('图片路径改写失败', error)
-      }
-    }
-    yield chunk
-  }
+  logger.info('已挂载图片回环路由, resolveImage 授权端点' + (systemPrompt !== undefined ? '与系统提示词指引' : ''))
 }

@@ -18,6 +18,15 @@ export type SetConfigArgs = {
   maxHeight?: number
 }
 
+export type ResolveImageArgs = {
+  path: string
+  cwd?: string
+}
+
+export type ResolveImageResult = {
+  url?: string
+}
+
 function asFiniteNumber(value: unknown, label: string): number {
   const n = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(n)) throw new Error(label + ' 必须是有限数字')
@@ -47,12 +56,27 @@ function parseSetConfigArgs(value: unknown): SetConfigArgs {
   return out
 }
 
+function parseResolveImageArgs(value: unknown): ResolveImageArgs {
+  if (typeof value !== 'object' || value === null) throw new Error('resolveImage args 必须是对象')
+  const record = value as Record<string, unknown>
+  if (typeof record.path !== 'string' || record.path.trim() === '') throw new Error('path 必须是非空字符串')
+  if (record.cwd !== undefined && typeof record.cwd !== 'string') throw new Error('cwd 必须是字符串')
+  return { path: record.path, ...record.cwd === undefined ? {} : { cwd: record.cwd } }
+}
+
 function strictCodec(typeSymbol: string, parse: (value: unknown) => unknown) {
   return { mode: 'strict' as const, typeSymbol, schema: { parse } }
 }
 
 const configCodec = strictCodec('dsh-inline-images#Config', parseConfig)
 const setConfigArgsCodec = strictCodec('dsh-inline-images#SetConfigArgs', parseSetConfigArgs)
+const resolveImageArgsCodec = strictCodec('dsh-inline-images#ResolveImageArgs', parseResolveImageArgs)
+const resolveImageResultCodec = strictCodec('dsh-inline-images#ResolveImageResult', (value) => {
+  if (typeof value !== 'object' || value === null) throw new Error('result 必须是对象')
+  const record = value as Record<string, unknown>
+  if (record.url !== undefined && typeof record.url !== 'string') throw new Error('url 必须是字符串')
+  return { ...record.url === undefined ? {} : { url: record.url } }
+})
 
 /** Host ctx.typert.register 与 Client ctx.remote.$mount 共用的调用描述符. */
 export const INLINE_INVOCATIONS = [
@@ -79,6 +103,20 @@ export const INLINE_INVOCATIONS = [
     }],
     result: configCodec,
   },
+  {
+    id: 'dsh-inline-images#inlineImages/resolveImage',
+    service: 'inlineImages',
+    namespace: 'inlineImages',
+    method: 'resolveImage',
+    invocation: { kind: 'direct' as const },
+    parameters: [{
+      name: 'args',
+      wire: 'args',
+      source: 'json' as const,
+      codec: resolveImageArgsCodec,
+    }],
+    result: resolveImageResultCodec,
+  },
 ]
 
 export const INLINE_REMOTE_CONTRIBUTION = {
@@ -99,6 +137,7 @@ export const INLINE_MANIFEST = {
       members: [
         { kind: 'method' as const, name: 'getConfig', signature: 'getConfig(): Promise<Config>' },
         { kind: 'method' as const, name: 'setConfig', signature: 'setConfig(args: SetConfigArgs): Promise<Config>' },
+        { kind: 'method' as const, name: 'resolveImage', signature: 'resolveImage(args: ResolveImageArgs): Promise<ResolveImageResult>' },
       ],
       types: [],
     }],

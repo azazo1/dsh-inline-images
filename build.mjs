@@ -17,7 +17,7 @@ await build({
 })
 
 await build({
-  entryPoints: ['src/client.ts'],
+  entryPoints: ['src/client/index.ts'],
   outfile: 'lib/client.js',
   bundle: true,
   platform: 'browser',

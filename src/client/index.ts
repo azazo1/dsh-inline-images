@@ -1,13 +1,14 @@
+import type { Context } from './client-types.ts'
+import { INLINE_REMOTE_CONTRIBUTION, PLUGIN_NAME, ROUTE_PATH } from '../shared.ts'
+import { SpanReplacer } from './span-replacer.ts'
+
 /**
  * dsh-inline-images client (dsh 0.1.2-rc.1):
- *  - 顶层 window.__ModuleLoader__.load 注册, id 必须等于 package.json name.
- *  - factory 内 require('react'), 不要自带一份 React runtime.
- *  - shell.overlay 灯箱: 点击消息正文中本插件渲染的图片放大; 点背景或 Esc 关闭.
- *  - 正文图片最大尺寸: 设置 -> 内联图片 (经 ctx.remote.inlineImages 读写, 返回 RemoteResult).
- *  - 尺寸 CSS 注入 img[src*="/plugins/dsh-inline-images/image"].
+ *  - 前端替换: 扫描 MarkdownText 因 URL 白名单被拒而降级的图片路径 span,
+ *    经 host resolveImage 授权后替换为同源回环 <img>; 会话日志保持模型原始文本.
+ *  - shell.overlay 灯箱: 点击替换出的图片放大; 点背景或 Esc 关闭.
+ *  - 设置 -> 内联图片 (ctx.remote.inlineImages) 控制正文图片最大尺寸.
  */
-import { INLINE_REMOTE_CONTRIBUTION, PLUGIN_NAME, ROUTE_PATH } from './shared.ts'
-
 declare const window: {
   __ModuleLoader__: {
     load(registration: {
@@ -62,7 +63,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function unwrapRemote(result: any, fallbackMessage: string): any {
+    function unwrapRemoteResult(result: any, fallbackMessage: string): any {
       if (result && typeof result === 'object' && 'ok' in result) {
         if (result.ok === true) return result.value
         const err = result.error
@@ -85,7 +86,7 @@ window.__ModuleLoader__.load({
         }
         remote.inlineImages.getConfig().then((result: any) => {
           if (!alive) return
-          const cfg = unwrapRemote(result, '读取配置失败')
+          const cfg = unwrapRemoteResult(result, '读取配置失败')
           setMaxWidth(cfg.maxWidth ?? 640)
           setMaxHeight(cfg.maxHeight ?? 420)
           applyImageSizes(cfg.maxWidth ?? 640, cfg.maxHeight ?? 420)
@@ -102,7 +103,7 @@ window.__ModuleLoader__.load({
         }
         setStatus(null)
         remote.inlineImages.setConfig({ maxWidth: Number(maxWidth) || 640, maxHeight: Number(maxHeight) || 420 }).then((result: any) => {
-          const cfg = unwrapRemote(result, '保存失败')
+          const cfg = unwrapRemoteResult(result, '保存失败')
           setMaxWidth(cfg.maxWidth)
           setMaxHeight(cfg.maxHeight)
           applyImageSizes(cfg.maxWidth, cfg.maxHeight)
@@ -117,7 +118,7 @@ window.__ModuleLoader__.load({
 
       return el('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 } },
         el('div', { style: { fontSize: 12, opacity: 0.7, lineHeight: 1.5 } },
-          'LLM 回复中写出的本地图片路径 (如 C:\\截图\\a.png) 会在消息正文里直接渲染成图片. 可在此调整正文图片的最大显示尺寸; 点击正文图片可放大查看原图. 支持格式: png/jpg/jpeg/webp/gif/svg/avif/bmp/ico.',
+          'LLM 回复中写出的 ![路径](路径) 形式图片引用 (支持绝对路径或相对会话工作目录的相对路径) 会在前端渲染成图片, 会话内容保持原样. 可在此调整正文图片的最大显示尺寸; 点击正文图片可放大查看原图. 支持格式: png/jpg/jpeg/webp/gif/svg/avif/bmp/ico.',
         ),
         el('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
           el('span', { style: { fontSize: 13 } }, '正文图片最大尺寸:'),
@@ -142,7 +143,26 @@ window.__ModuleLoader__.load({
       styleTag.textContent = 'img[src*="' + ROUTE_PATH + '"] { max-width: ' + maxWidth + 'px !important; max-height: ' + maxHeight + 'px !important; object-fit: contain; border-radius: 8px; }'
     }
 
-    async function apply(ctx: any): Promise<void> {
+    function makeSpanToImage(openLightbox: (src: string, name: string) => void) {
+      return (span: Element, url: string, path: string) => {
+        if (typeof document === 'undefined') return
+        const img = document.createElement('img')
+        img.src = url
+        img.alt = path
+        img.loading = 'lazy'
+        img.decoding = 'async'
+        img.referrerPolicy = 'no-referrer'
+        img.dataset.inlineImage = PLUGIN_NAME
+        img.addEventListener('click', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          openLightbox(url, path)
+        })
+        span.replaceWith(img)
+      }
+    }
+
+    async function apply(ctx: Context): Promise<void> {
       await ctx.remote.$mount(INLINE_REMOTE_CONTRIBUTION)
 
       ctx.slots.inject('shell.overlay', () => ctx.slots.register(
@@ -155,22 +175,31 @@ window.__ModuleLoader__.load({
       ))
 
       if (typeof document !== 'undefined') {
-        const onClick = (event: MouseEvent) => {
-          const target = event.target as HTMLElement | null
-          if (!target || target.tagName !== 'IMG') return
-          const src = String((target as HTMLImageElement).src ?? '')
-          if (src.indexOf(ROUTE_PATH) === -1) return
-          event.preventDefault()
-          event.stopPropagation()
-          lightboxStore.open(src, (target as HTMLImageElement).alt || '图片')
+        const replacer = new SpanReplacer(ctx.remote as any, makeSpanToImage((src, name) => lightboxStore.open(src, name)))
+
+        const scanAll = (root: ParentNode) => {
+          replacer.scan(root)
         }
+
+        // 流式渲染与翻页都会改动 DOM: 双通道兜底 (初始全量 + observer 增量).
+        scanAll(document.body)
+        const observer = new MutationObserver(mutations => {
+          for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+              if (node.nodeType === Node.ELEMENT_NODE) scanAll(node as Element)
+              else if (node.nodeType === Node.TEXT_NODE && node.parentElement !== null) scanAll(node.parentElement)
+            }
+            if (mutation.type === 'characterData' && mutation.target.parentElement !== null) scanAll(mutation.target.parentElement)
+          }
+        })
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+
         const onKey = (event: KeyboardEvent) => {
           if (event.key === 'Escape') lightboxStore.close()
         }
-        document.addEventListener('click', onClick, true)
         document.addEventListener('keydown', onKey, true)
         ctx.effect(() => () => {
-          document.removeEventListener('click', onClick, true)
+          observer.disconnect()
           document.removeEventListener('keydown', onKey, true)
           if (styleTag !== null && styleTag.parentNode !== null) styleTag.parentNode.removeChild(styleTag)
         })
