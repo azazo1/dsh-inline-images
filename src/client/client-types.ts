@@ -6,5 +6,15 @@ export type Context = {
     register(declaration: Record<string, unknown>, component: unknown): unknown
   }
   effect(fn: () => () => void, label?: string): unknown
+  inject?(deps: string[], fn: (ctx: Context) => void): Promise<unknown> & { dispose?: () => void | Promise<void> }
+  get?(name: string): unknown
+  sessions?: {
+    list?: {
+      getSnapshot(): {
+        current?: string
+        byId?: Record<string, { cwd?: string; parentId?: string }>
+      }
+    }
+  }
   logger?(target: string): { info(message: string): void; warn(message: string): void; error(message: string): void }
 }

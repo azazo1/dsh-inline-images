@@ -9,9 +9,7 @@ export function findDegradedImageSpans(root: ParentNode): HTMLSpanElement[] {
   const spans = root.querySelectorAll('span')
   const found: HTMLSpanElement[] = []
   for (const span of spans) {
-    if (span.childNodes.length !== 1) continue
-    const first = span.childNodes[0]
-    if (first.nodeType !== Node.TEXT_NODE) continue
+    if (span.children.length !== 0) continue
     const text = span.textContent?.trim() ?? ''
     if (!isCandidateText(text)) continue
     found.push(span)
@@ -24,6 +22,7 @@ export function isCandidateText(text: string): boolean {
   if (text.length < 3 || text.length > 1024) return false
   if (/(^|[^\\])\s/.test(text)) return false
   if (/^https?:/i.test(text)) return false
+  if (/[*?[\]]/.test(text)) return false
   if (text.includes(ROUTE_PATH)) return false
   return /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)$/i.test(text)
 }

@@ -50,10 +50,11 @@ const ABSOLUTE_PATH_RE = /^([A-Za-z]:[\\/]|\\\\|\/)/
 const URL_LIKE_RE = /^(https?:|data:|file:|blob:|mailto:)/i
 const PLACEHOLDER_SEGMENT = /^(路径|示例|占位|本地路径|某某|xx|xxx)$/i
 
-/** 前端候选校验: 图片后缀 + 非 URL + 非占位段. 路径可为绝对或相对. */
+/** 前端候选校验: 图片后缀 + 非 URL + 非占位段 + 非 glob. 路径可为绝对或相对. */
 export function isImageCandidatePath(path: string): boolean {
   if (path.length < 3) return false
   if (URL_LIKE_RE.test(path)) return false
+  if (/[*?[\]]/.test(path)) return false
   if (!IMAGE_EXT_RE.test(path)) return false
   if (path.split(/[\\/]/).some(segment => PLACEHOLDER_SEGMENT.test(segment))) return false
   return true
@@ -65,6 +66,10 @@ export class InlineImagesRuntime extends TypertRemoteService {
   private readonly fs: Context['fs'] | undefined
   private readonly webServer: { port: number } | undefined
   private tokenPromise: Promise<string> | undefined
+  /** apply 注入, 与图片路由共用同一 getToken, 避免 credentials 未注入时签发失败. */
+  tokenSource: () => Promise<string> = async () => {
+    throw new Error('token source unset')
+  }
 
   constructor(ctx: Context) {
     super(ctx, 'inlineImages')
@@ -132,24 +137,20 @@ export class InlineImagesRuntime extends TypertRemoteService {
    * 前端授权入口: 校验路径指向真实存在的图片文件, 返回同源回环 URL.
    * 相对路径按 args.cwd (发起会话的工作目录) 解析; 不存在或非法时返回空对象.
    */
-  async resolveImage(args: ResolveImageArgs): Promise<ResolveImageResult> {
-    const fs = this.fs
-    const webServer = this.webServer
+  async resolveImage(input: ResolveImageArgs): Promise<ResolveImageResult> {
+    const args = unwrapResolveArgs(input)
+    const fs = (this.ctx.get?.('fs') as Context['fs'] | undefined) ?? this.fs
+    const webServer = (this.ctx.get?.('webServer') as { port: number } | undefined) ?? this.webServer
     if (fs === undefined || webServer === undefined) return {}
-    const raw = args.path.trim()
+    const raw = typeof args.path === 'string' ? args.path.trim() : ''
     if (!isImageCandidatePath(raw)) return {}
-    if (!ABSOLUTE_PATH_RE.test(raw) && (args.cwd === undefined || args.cwd.trim() === '')) return {}
+    const cwd = typeof args.cwd === 'string' && args.cwd.trim() !== '' ? args.cwd.trim() : undefined
+    if (!ABSOLUTE_PATH_RE.test(raw) && cwd === undefined) return {}
     try {
-      const target = await fs.resolve(raw, args.cwd === undefined ? undefined : { cwd: args.cwd })
+      const target = await fs.resolve(raw, cwd === undefined ? undefined : { cwd })
       const info = await fs.stat(target)
       if (info === undefined || info.type !== 'file') return {}
-      const token = this.credentials === undefined
-        ? undefined
-        : await this.ensureToken(
-            ref => this.credentials.resolve(ref),
-            (ref, value) => this.credentials.set(ref, value),
-          )
-      if (token === undefined) return {}
+      const token = await this.tokenSource()
       return {
         url: 'http://127.0.0.1:' + webServer.port + ROUTE_PATH + '?t=' + token + '&p=' + encodeURIComponent(target.displayPath),
       }
@@ -157,6 +158,15 @@ export class InlineImagesRuntime extends TypertRemoteService {
       return {}
     }
   }
+}
+
+function unwrapResolveArgs(input: ResolveImageArgs | { args?: ResolveImageArgs }): ResolveImageArgs {
+  if (input !== null && typeof input === 'object' && 'path' in input && typeof (input as ResolveImageArgs).path === 'string') {
+    return input as ResolveImageArgs
+  }
+  const nested = (input as { args?: ResolveImageArgs }).args
+  if (nested !== undefined && typeof nested.path === 'string') return nested
+  return { path: '' }
 }
 
 type ConnectionHandle = { requestRejection(request: { headers: unknown }): 401 | 403 | undefined }
@@ -207,6 +217,7 @@ export function apply(ctx: Context): void {
   }
 
   const runtime = new InlineImagesRuntime(ctx)
+  runtime.tokenSource = getToken
   if (typert !== undefined) typert.register(INLINE_MANIFEST)
   // 路由与 resolveImage 共用同一 token 来源: runtime 的惰性初始化落在凭证存储中.
   runtime.ensureToken(

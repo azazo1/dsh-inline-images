@@ -1,7 +1,7 @@
 import { findDegradedImageSpans, IMG_FLAG, pathTextOf } from './detect.ts'
-import { requestImageUrl, resolveCwdHint } from './remote.ts'
+import { requestImageUrl } from './remote.ts'
 
-type RemoteLike = Parameters<typeof requestImageUrl>[0]
+type ResolveImageFn = (args: { path: string; cwd?: string }) => Promise<unknown>
 
 /**
  * 消息文本降级 span 的前端替换器.
@@ -9,13 +9,19 @@ type RemoteLike = Parameters<typeof requestImageUrl>[0]
  * 经 host resolveImage 授权后替换为 <img>. 不修改任何会话数据.
  */
 export class SpanReplacer {
-  private remote: RemoteLike
+  private resolveImage: ResolveImageFn | undefined
+  private getCwd: () => string | undefined
   private replaceSpan: (span: Element, url: string, path: string) => void
   private pending = new Set<Element>()
   private inflight = new Set<string>()
 
-  constructor(remote: RemoteLike, replaceSpan: (span: Element, url: string, path: string) => void) {
-    this.remote = remote
+  constructor(
+    resolveImage: ResolveImageFn | undefined,
+    getCwd: () => string | undefined,
+    replaceSpan: (span: Element, url: string, path: string) => void,
+  ) {
+    this.resolveImage = resolveImage
+    this.getCwd = getCwd
     this.replaceSpan = replaceSpan
   }
 
@@ -34,7 +40,7 @@ export class SpanReplacer {
   private async resolveOne(span: Element, path: string): Promise<void> {
     this.inflight.add(path)
     try {
-      const url = await requestImageUrl(this.remote, path, resolveCwdHint(span))
+      const url = await requestImageUrl(this.resolveImage, path, this.getCwd())
       this.pending.delete(span)
       if (url === undefined || !span.isConnected) return
       this.replaceSpan(span, url, path)

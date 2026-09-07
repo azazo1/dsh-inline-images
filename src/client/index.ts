@@ -1,5 +1,6 @@
 import type { Context } from './client-types.ts'
 import { INLINE_REMOTE_CONTRIBUTION, PLUGIN_NAME, ROUTE_PATH } from '../shared.ts'
+import { sessionCwdOf } from './remote.ts'
 import { SpanReplacer } from './span-replacer.ts'
 
 /**
@@ -162,53 +163,62 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function apply(ctx: Context): Promise<void> {
-      await ctx.remote.$mount(INLINE_REMOTE_CONTRIBUTION)
-
-      ctx.slots.inject('shell.overlay', () => ctx.slots.register(
+    function applyMounted(scope: Context, sessions: Context['sessions'], inlineImages: any): void {
+      scope.slots.inject('shell.overlay', () => scope.slots.register(
         { name: 'shell.overlay', id: 'inline-images-lightbox', order: 100, label: '图片灯箱' },
         () => React.createElement(ImageLightbox, null),
       ))
-      ctx.slots.inject('settings.section', () => ctx.slots.register(
+      scope.slots.inject('settings.section', () => scope.slots.register(
         { name: 'settings.section', id: 'inline-images', order: 35, label: '内联图片' },
-        (props: any) => React.createElement(InlineSettings, { ...props, ctx }),
+        (props: any) => React.createElement(InlineSettings, { ...props, ctx: { ...scope, remote: { inlineImages } } }),
       ))
 
-      if (typeof document !== 'undefined') {
-        const replacer = new SpanReplacer(ctx.remote as any, makeSpanToImage((src, name) => lightboxStore.open(src, name)))
+      if (typeof document === 'undefined') return
+      const replacer = new SpanReplacer(
+        (args) => inlineImages.resolveImage(args),
+        () => sessionCwdOf(sessions),
+        makeSpanToImage((src, name) => lightboxStore.open(src, name)),
+      )
 
-        const scanAll = (root: ParentNode) => {
-          replacer.scan(root)
-        }
-
-        // 流式渲染与翻页都会改动 DOM: 双通道兜底 (初始全量 + observer 增量).
-        scanAll(document.body)
-        const observer = new MutationObserver(mutations => {
-          for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-              if (node.nodeType === Node.ELEMENT_NODE) scanAll(node as Element)
-              else if (node.nodeType === Node.TEXT_NODE && node.parentElement !== null) scanAll(node.parentElement)
-            }
-            if (mutation.type === 'characterData' && mutation.target.parentElement !== null) scanAll(mutation.target.parentElement)
-          }
-        })
-        observer.observe(document.body, { childList: true, subtree: true, characterData: true })
-
-        const onKey = (event: KeyboardEvent) => {
-          if (event.key === 'Escape') lightboxStore.close()
-        }
-        document.addEventListener('keydown', onKey, true)
-        ctx.effect(() => () => {
-          observer.disconnect()
-          document.removeEventListener('keydown', onKey, true)
-          if (styleTag !== null && styleTag.parentNode !== null) styleTag.parentNode.removeChild(styleTag)
-        })
+      const scanAll = (root: ParentNode) => {
+        replacer.scan(root)
       }
+
+      // 流式渲染与翻页都会改动 DOM: 双通道兜底 (初始全量 + observer 增量).
+      scanAll(document.body)
+      const observer = new MutationObserver(mutations => {
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE) scanAll(node as Element)
+            else if (node.nodeType === Node.TEXT_NODE && node.parentElement !== null) scanAll(node.parentElement)
+          }
+          if (mutation.type === 'characterData' && mutation.target.parentElement !== null) scanAll(mutation.target.parentElement)
+        }
+      })
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') lightboxStore.close()
+      }
+      document.addEventListener('keydown', onKey, true)
+      scope.effect(() => () => {
+        observer.disconnect()
+        document.removeEventListener('keydown', onKey, true)
+        if (styleTag !== null && styleTag.parentNode !== null) styleTag.parentNode.removeChild(styleTag)
+      })
+    }
+
+    async function apply(ctx: Context): Promise<void> {
+      await ctx.remote.$mount(INLINE_REMOTE_CONTRIBUTION)
+      // 不要用 ctx.remote.inlineImages (未 inject 会抛错), 也不要 ctx.inject 等这个 key (外部插件 fiber 可能永远等不到).
+      const inlineImages = typeof ctx.get === 'function' ? ctx.get('remote.inlineImages') : undefined
+      if (inlineImages === undefined || typeof inlineImages.resolveImage !== 'function') return
+      applyMounted(ctx, ctx.sessions, inlineImages)
     }
 
     return {
       name: PLUGIN_NAME,
-      inject: ['slots', 'remote'],
+      inject: ['slots', 'remote', 'sessions'],
       apply,
     }
   },
