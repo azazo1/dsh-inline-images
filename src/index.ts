@@ -30,7 +30,7 @@ const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
 const REF_TOKEN = 'INLINE_IMAGE_TOKEN'
 
 const PROMPT_SECTION_NAME = 'plugin:dsh-inline-images'
-const INLINE_IMAGES_PROMPT = 'Inline images in Web chat: to let the user preview a local image file (png/jpg/jpeg/webp/gif/svg/avif/bmp/ico), write the same image path twice as a Markdown image in the reply text, like ![path](path) — the alt text must be the path itself, because the preview is recovered from the visible text. Use an absolute path or a path relative to the session working directory, and only reference image files you have confirmed exist. A bare path in plain text stays plain text. Usually you want to show user a local image when you have created it, or you have created an pdf and demostrate its page(s).'
+const INLINE_IMAGES_PROMPT = 'Inline images in Web chat: to let the user preview a local image file (png/jpg/jpeg/webp/gif/svg/avif/bmp/ico), write the same image path twice as a Markdown image in the reply text, like ![path](path) — the alt text must be the path itself, because the preview is recovered from the visible text. Use an absolute path or a path relative to the session working directory, and only reference image files you have confirmed exist. A bare path in plain text stays plain text. Usually you want to show user a local image when you have created it, or you have created an pdf and demostrate its page(s). But dont create images unnecessarily.'
 
 function mediaTypeFor(path: string): string | null {
   const lower = path.toLowerCase()
