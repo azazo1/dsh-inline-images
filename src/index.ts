@@ -1,58 +1,28 @@
 /**
- * dsh-inline-images host:「对话显示图片」。
- *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<path>(与 Web 页面同源)。
- *  - token 首次生成后持久化到凭证存储(INLINE_IMAGE_TOKEN), 重启后历史消息中的图片 URL 仍然有效。
- *  - llm/stream 包装:把助手消息文本中的本地图片路径改写为该 URL → 产品 MarkdownText 在消息正文内渲染图片。
- *  - InlineImagesRuntime:Typert Remote 服务(getConfig / setConfig,控制正文图片最大尺寸)。
+ * dsh-inline-images host: 对话显示图片.
+ *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<path> (与 Web 页面同源).
+ *  - token 首次生成后持久化到凭证存储 (INLINE_IMAGE_TOKEN), 重启后历史消息中的图片 URL 仍然有效.
+ *  - llm/stream 包装: 把助手消息文本中的本地图片路径改写为该 URL, 产品 MarkdownText 在消息正文内渲染图片.
+ *  - InlineImagesRuntime: Typert Remote 服务 (getConfig / setConfig, 控制正文图片最大尺寸).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry/types'
-import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol'
-import { z } from 'zod'
+import {
+  IMAGE_FORMATS,
+  INLINE_MANIFEST,
+  PLUGIN_NAME,
+  ROUTE_PATH,
+  type SetConfigArgs,
+} from './shared.ts'
 
-export const name = 'dsh-inline-images'
+export const name = PLUGIN_NAME
 export const inject = ['llm']
 
-const ROUTE_PATH = '/plugins/dsh-inline-images/image'
 const REF_MAX_WIDTH = 'INLINE_IMAGE_MAX_WIDTH'
 const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
 const REF_TOKEN = 'INLINE_IMAGE_TOKEN'
-const IMAGE_FORMATS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif', 'bmp', 'ico']
-
-/* ---------- wire contract ---------- */
-const configSchema = z.object({ maxWidth: z.number(), maxHeight: z.number(), formats: z.array(z.string()) }).readonly()
-export const INLINE_INVOCATIONS: readonly InvocationDescriptor[] = [
-  { id: 'dsh-inline-images#inlineImages/getConfig', service: 'inlineImages', namespace: 'inlineImages', method: 'getConfig', invocation: { kind: 'direct' },
-    parameters: [], result: { mode: 'strict', typeSymbol: 'dsh-inline-images#Config', schema: configSchema } },
-  { id: 'dsh-inline-images#inlineImages/setConfig', service: 'inlineImages', namespace: 'inlineImages', method: 'setConfig', invocation: { kind: 'direct' },
-    parameters: [{ name: 'args', wire: 'args', source: 'argument', codec: { mode: 'strict', typeSymbol: 'dsh-inline-images#SetConfigArgs', schema: z.object({ maxWidth: z.number().optional(), maxHeight: z.number().optional() }) } }],
-    result: { mode: 'strict', typeSymbol: 'dsh-inline-images#Config', schema: configSchema } },
-]
-
-export const INLINE_MANIFEST: TypertContribution = {
-  package: 'dsh-inline-images',
-  face: 'host',
-  schemas: [],
-  model: {
-    services: [{
-      key: 'inlineImages',
-      exportName: 'InlineImagesRuntime',
-      description: '对话内联图片的尺寸配置端点。',
-      tags: [],
-      members: [
-        { kind: 'method', name: 'getConfig', signature: 'getConfig(): Promise<Config>' },
-        { kind: 'method', name: 'setConfig', signature: 'setConfig(args: SetConfigArgs): Promise<Config>' },
-      ],
-      types: [],
-    }],
-    events: [],
-    objects: [],
-  },
-  invocations: INLINE_INVOCATIONS,
-}
 
 function mediaTypeFor(path: string): string | null {
   const lower = path.toLowerCase()
@@ -67,7 +37,7 @@ function mediaTypeFor(path: string): string | null {
   return null
 }
 
-/** Remote service:正文图片最大尺寸配置。 */
+/** Remote service: 正文图片最大尺寸配置. TypertRemoteService 构造时已经 provide(serviceKey). */
 export class InlineImagesRuntime extends TypertRemoteService {
   private readonly credentials: Context['credentials'] | undefined
 
@@ -91,12 +61,12 @@ export class InlineImagesRuntime extends TypertRemoteService {
     return {
       maxWidth: await read(REF_MAX_WIDTH, 640),
       maxHeight: await read(REF_MAX_HEIGHT, 420),
-      formats: IMAGE_FORMATS,
+      formats: [...IMAGE_FORMATS],
     }
   }
 
-  async setConfig(args: { maxWidth?: number; maxHeight?: number }) {
-    if (this.credentials === undefined) throw new Error('凭证服务不可用,无法保存配置')
+  async setConfig(args: SetConfigArgs) {
+    if (this.credentials === undefined) throw new Error('凭证服务不可用, 无法保存配置')
     if (typeof args.maxWidth === 'number') {
       const value = Math.round(args.maxWidth)
       if (!(value >= 64 && value <= 2400)) throw new Error('宽度需在 64-2400 之间')
@@ -111,7 +81,6 @@ export class InlineImagesRuntime extends TypertRemoteService {
   }
 }
 
-/* ---------- 路径扫描(与动态版一致) ---------- */
 const BARE_STOP = "\\s'\"<>\\[\\]\u3001\uFF0C\u3002\uFF1B;`"
 const PLACEHOLDER_SEGMENT = /^(路径|示例|占位|本地路径|某某|xx|xxx)$/i
 const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|svg|avif|bmp|ico)$/i
@@ -171,14 +140,19 @@ function scanImagePathRanges(text: string): Array<{ path: string; rawStart: numb
   return found
 }
 
+type TypertRegistry = { register(contribution: unknown): () => void | Promise<void> }
+type ConnectionHandle = { requestRejection(request: { headers: unknown }): 401 | 403 | undefined }
+
 export function apply(ctx: Context): void {
+  const logger = ctx.logger(PLUGIN_NAME)
   const fs = ctx.get('fs')
   const attachments = ctx.get('attachments')
   const webServer = ctx.get('webServer')
   const llm = ctx.get('llm')
   const credentials = ctx.get('credentials')
+  const connection = ctx.get('connection') as ConnectionHandle | undefined
+  const typert = ctx.get('typert') as TypertRegistry | undefined
 
-  // token 持久化: 首次生成后写入凭证存储, 重启复用同一 token, 历史消息中的图片 URL 保持有效
   let token: string | undefined
   let tokenPromise: Promise<string> | undefined
   const getToken = (): Promise<string> => {
@@ -192,12 +166,16 @@ export function apply(ctx: Context): void {
               token = stored
               return stored
             }
-          } catch { /* 读取失败则重新生成 */ }
+          } catch {
+            /* 读取失败则重新生成 */
+          }
         }
         const fresh = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
         token = fresh
         if (credentials !== undefined) {
-          try { await credentials.set(REF_TOKEN as never, fresh) } catch { /* 保存失败则本次会话内仍可用 */ }
+          try { await credentials.set(REF_TOKEN as never, fresh) } catch {
+            /* 保存失败则本次会话内仍可用 */
+          }
         }
         return fresh
       })()
@@ -205,21 +183,23 @@ export function apply(ctx: Context): void {
     return tokenPromise
   }
 
-  // Remote 服务
-  const runtime = new InlineImagesRuntime(ctx)
-  ctx.provide('inlineImages', runtime as never)
-  ctx.effect(() => {
-    const dispose = (ctx.typert as any).register(INLINE_MANIFEST)
-    return () => { void dispose() }
-  }, 'dsh-inline-images: typert manifest')
+  new InlineImagesRuntime(ctx)
+  if (typert !== undefined) typert.register(INLINE_MANIFEST)
 
-  // 图片回环路由
   if (webServer !== undefined && fs !== undefined) {
     ctx.effect(() => webServer.register({
       kind: 'exact',
       path: ROUTE_PATH,
       async handler(req: any, res: any) {
         try {
+          if (connection !== undefined) {
+            const rejection = connection.requestRejection(req)
+            if (rejection !== undefined) {
+              res.writeHead(rejection)
+              res.end()
+              return
+            }
+          }
           const raw = String(req.url ?? '')
           const at = raw.indexOf('?')
           const query: Record<string, string> = {}
@@ -255,19 +235,22 @@ export function apply(ctx: Context): void {
     }), 'dsh-inline-images: image route')
   }
 
-  // llm/stream 包装
   if (llm !== undefined && webServer !== undefined) {
     void getToken()
     ctx.on('llm/stream', (options: any, next: any) => {
       if (options?.purpose) return next()
-      return rewriteStream(next, webServer.port, getToken, fs)
+      return rewriteStream(next, webServer.port, getToken, fs, logger)
     })
   }
-
-  void runtime
 }
 
-async function* rewriteStream(next: any, port: number, getToken: () => Promise<string>, fs: Context['fs']) {
+async function* rewriteStream(
+  next: any,
+  port: number,
+  getToken: () => Promise<string>,
+  fs: Context['fs'],
+  logger: { error(message: string, extra?: unknown): void },
+) {
   const seenPaths = new Set<string>()
   for await (const chunk of next()) {
     if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
@@ -277,7 +260,7 @@ async function* rewriteStream(next: any, port: number, getToken: () => Promise<s
         if (ranges.length > 0 && fs !== undefined) {
           let rewritten = text
           let changed = false
-          const todo: Array<{ range: any; url: string }> = []
+          const todo: Array<{ range: { path: string; rawStart: number; rawEnd: number }; url: string }> = []
           for (const range of ranges) {
             if (seenPaths.has(range.path)) continue
             seenPaths.add(range.path)
@@ -288,7 +271,10 @@ async function* rewriteStream(next: any, port: number, getToken: () => Promise<s
             } catch {
               continue
             }
-            todo.push({ range, url: 'http://127.0.0.1:' + port + ROUTE_PATH + '?t=' + await getToken() + '&p=' + encodeURIComponent(range.path) })
+            todo.push({
+              range,
+              url: 'http://127.0.0.1:' + port + ROUTE_PATH + '?t=' + await getToken() + '&p=' + encodeURIComponent(range.path),
+            })
           }
           todo.sort((a, b) => b.range.rawStart - a.range.rawStart)
           for (const { range, url } of todo) {
@@ -302,7 +288,7 @@ async function* rewriteStream(next: any, port: number, getToken: () => Promise<s
           }
         }
       } catch (error) {
-        console.error('[dsh-inline-images] 图片路径改写失败:', error)
+        logger.error('图片路径改写失败', error)
       }
     }
     yield chunk
