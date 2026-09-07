@@ -18,7 +18,7 @@ import {
 } from './shared.ts'
 
 export const name = PLUGIN_NAME
-export const inject = ['llm']
+export const inject = ['llm', 'fs', 'webServer']
 
 const REF_MAX_WIDTH = 'INLINE_IMAGE_MAX_WIDTH'
 const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
@@ -186,8 +186,7 @@ export function apply(ctx: Context): void {
   new InlineImagesRuntime(ctx)
   if (typert !== undefined) typert.register(INLINE_MANIFEST)
 
-  if (webServer !== undefined && fs !== undefined) {
-    ctx.effect(() => webServer.register({
+  ctx.effect(() => webServer.register({
       kind: 'exact',
       path: ROUTE_PATH,
       async handler(req: any, res: any) {
@@ -233,15 +232,13 @@ export function apply(ctx: Context): void {
         }
       },
     }), 'dsh-inline-images: image route')
-  }
 
-  if (llm !== undefined && webServer !== undefined) {
-    void getToken()
-    ctx.on('llm/stream', (options: any, next: any) => {
-      if (options?.purpose) return next()
-      return rewriteStream(next, webServer.port, getToken, fs, logger)
-    })
-  }
+  void getToken()
+  ctx.on('llm/stream', (options: any, next: any) => {
+    if (options?.purpose) return next()
+    return rewriteStream(next, webServer.port, getToken, fs, logger)
+  })
+  logger.info('已挂载图片回环路由与 llm/stream 改写')
 }
 
 async function* rewriteStream(
