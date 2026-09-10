@@ -1,7 +1,7 @@
 /**
  * dsh-inline-images host: 对话显示图片.
  *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<绝对路径> (与 Web 页面同源).
- *  - token 首次生成后持久化到凭证存储 (INLINE_IMAGE_TOKEN), 重启后历史图片 URL 仍然有效.
+ *  - 宽高写入 settings 命名空间 dsh-inline-images; token 仍持久化到凭证存储 (INLINE_IMAGE_TOKEN).
  *  - 不改写模型输出: 会话日志只保存模型原始的 ![路径](路径) 文本, 零污染.
  *  - InlineImagesRuntime.resolveImage: 供前端把 MarkdownText 降级文本替换为授权 URL;
  *    相对路径按调用方传入的会话工作目录解析.
@@ -11,12 +11,18 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-settings'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { InlineImagesSettingsSchema, type SettingsOwner } from './config.ts'
 import {
+  clampImageSize,
+  DEFAULT_MAX_HEIGHT,
+  DEFAULT_MAX_WIDTH,
   IMAGE_FORMATS,
   INLINE_MANIFEST,
   PLUGIN_NAME,
   ROUTE_PATH,
+  SETTINGS_NAMESPACE,
   type ResolveImageArgs,
   type ResolveImageResult,
   type SetConfigArgs,
@@ -25,8 +31,6 @@ import {
 export const name = PLUGIN_NAME
 export const inject = ['fs', 'webServer']
 
-const REF_MAX_WIDTH = 'INLINE_IMAGE_MAX_WIDTH'
-const REF_MAX_HEIGHT = 'INLINE_IMAGE_MAX_HEIGHT'
 const REF_TOKEN = 'INLINE_IMAGE_TOKEN'
 
 const PROMPT_SECTION_NAME = 'plugin:dsh-inline-images'
@@ -62,10 +66,10 @@ export function isImageCandidatePath(path: string): boolean {
 
 /** Remote service: 尺寸配置与图片 URL 授权. TypertRemoteService 构造时已经 provide(serviceKey). */
 export class InlineImagesRuntime extends TypertRemoteService {
-  private readonly credentials: Context['credentials'] | undefined
   private readonly fs: Context['fs'] | undefined
   private readonly webServer: { port: number } | undefined
   private tokenPromise: Promise<string> | undefined
+  private settingsOwner: SettingsOwner | undefined
   /** apply 注入, 与图片路由共用同一 getToken, 避免 credentials 未注入时签发失败. */
   tokenSource: () => Promise<string> = async () => {
     throw new Error('token source unset')
@@ -73,9 +77,13 @@ export class InlineImagesRuntime extends TypertRemoteService {
 
   constructor(ctx: Context) {
     super(ctx, 'inlineImages')
-    this.credentials = ctx.get('credentials')
     this.fs = ctx.get('fs')
     this.webServer = ctx.get('webServer')
+  }
+
+  /** 由 apply 在 settings 注入回调里挂上命名空间 owner. */
+  attachSettings(owner: SettingsOwner): void {
+    this.settingsOwner = owner
   }
 
   /** 取回环 token (惰性初始化, 与 apply 内共享凭证存储). */
@@ -100,37 +108,28 @@ export class InlineImagesRuntime extends TypertRemoteService {
   }
 
   async getConfig() {
-    const read = async (ref: string, fallback: number): Promise<number> => {
-      if (this.credentials === undefined) return fallback
-      try {
-        const resolved = await this.credentials.resolve(ref as never)
-        if (resolved === undefined) return fallback
-        const value = Number(resolved.value)
-        return Number.isFinite(value) && value >= 64 ? Math.round(value) : fallback
-      } catch {
-        return fallback
-      }
-    }
+    const stored = this.settingsOwner?.get()
     return {
-      maxWidth: await read(REF_MAX_WIDTH, 640),
-      maxHeight: await read(REF_MAX_HEIGHT, 420),
+      maxWidth: stored?.maxWidth ?? DEFAULT_MAX_WIDTH,
+      maxHeight: stored?.maxHeight ?? DEFAULT_MAX_HEIGHT,
       formats: [...IMAGE_FORMATS],
     }
   }
 
   async setConfig(args: SetConfigArgs) {
-    if (this.credentials === undefined) throw new Error('凭证服务不可用, 无法保存配置')
-    if (typeof args.maxWidth === 'number') {
-      const value = Math.round(args.maxWidth)
-      if (!(value >= 64 && value <= 2400)) throw new Error('宽度需在 64-2400 之间')
-      await this.credentials.set(REF_MAX_WIDTH as never, String(value))
+    const owner = this.settingsOwner
+    if (owner === undefined) throw new Error('设置服务尚未就绪, 请稍后重试')
+    const patch: { maxWidth?: number; maxHeight?: number } = {}
+    if (typeof args.maxWidth === 'number') patch.maxWidth = clampImageSize(args.maxWidth, '宽度')
+    if (typeof args.maxHeight === 'number') patch.maxHeight = clampImageSize(args.maxHeight, '高度')
+    if (patch.maxWidth !== undefined || patch.maxHeight !== undefined) {
+      await owner.update(patch)
     }
-    if (typeof args.maxHeight === 'number') {
-      const value = Math.round(args.maxHeight)
-      if (!(value >= 64 && value <= 2400)) throw new Error('高度需在 64-2400 之间')
-      await this.credentials.set(REF_MAX_HEIGHT as never, String(value))
-    }
-    return this.getConfig()
+    const next = await this.getConfig()
+    this.ctx.logger(PLUGIN_NAME).info(
+      '已保存正文图片最大尺寸 ' + next.maxWidth + 'x' + next.maxHeight,
+    )
+    return next
   }
 
   /**
@@ -181,16 +180,18 @@ export function apply(ctx: Context): void {
   const fs = ctx.get('fs')
   const attachments = ctx.get('attachments')
   const webServer = ctx.get('webServer')
-  const credentials = ctx.get('credentials')
   const connection = ctx.get('connection') as ConnectionHandle | undefined
   const typert = ctx.get('typert') as TypertRegistry | undefined
   const systemPrompt = ctx.get('systemPrompt') as SystemPromptRegistry | undefined
+
+  const credentialsOf = () => ctx.get('credentials') as Context['credentials'] | undefined
 
   let token: string | undefined
   let tokenPromise: Promise<string> | undefined
   const getToken = (): Promise<string> => {
     if (tokenPromise === undefined) {
       tokenPromise = (async () => {
+        const credentials = credentialsOf()
         if (credentials !== undefined) {
           try {
             const resolved = await credentials.resolve(REF_TOKEN as never)
@@ -218,11 +219,21 @@ export function apply(ctx: Context): void {
 
   const runtime = new InlineImagesRuntime(ctx)
   runtime.tokenSource = getToken
+  ctx.inject(['settings'], (settingsCtx) => {
+    runtime.attachSettings(settingsCtx.settings.register(SETTINGS_NAMESPACE, InlineImagesSettingsSchema))
+    logger.info('已注册 settings 命名空间 ' + SETTINGS_NAMESPACE)
+  })
   if (typert !== undefined) typert.register(INLINE_MANIFEST)
   // 路由与 resolveImage 共用同一 token 来源: runtime 的惰性初始化落在凭证存储中.
   runtime.ensureToken(
-    ref => (credentials === undefined ? Promise.resolve(undefined) : credentials.resolve(ref)),
-    (ref, value) => (credentials === undefined ? Promise.resolve() : credentials.set(ref, value)),
+    ref => {
+      const credentials = credentialsOf()
+      return credentials === undefined ? Promise.resolve(undefined) : credentials.resolve(ref)
+    },
+    (ref, value) => {
+      const credentials = credentialsOf()
+      return credentials === undefined ? Promise.resolve() : credentials.set(ref, value)
+    },
   ).then(fresh => {
     if (token === undefined) {
       token = fresh

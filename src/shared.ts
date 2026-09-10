@@ -7,10 +7,30 @@ export const PLUGIN_NAME = 'dsh-inline-images'
 export const ROUTE_PATH = '/plugins/dsh-inline-images/image'
 export const IMAGE_FORMATS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'avif', 'bmp', 'ico'] as const
 
+/** Host settings 命名空间, 与插件名一致. */
+export const SETTINGS_NAMESPACE = PLUGIN_NAME
+export const DEFAULT_MAX_WIDTH = 640
+export const DEFAULT_MAX_HEIGHT = 420
+export const SIZE_MIN = 64
+export const SIZE_MAX = 2400
+
 export type InlineConfig = {
   maxWidth: number
   maxHeight: number
   formats: string[]
+}
+
+/**
+ * 校验并四舍五入到允许的像素范围.
+ * @param value - 用户输入.
+ * @param label - 错误文案中的字段名.
+ */
+export function clampImageSize(value: number, label: string): number {
+  const rounded = Math.round(value)
+  if (!(rounded >= SIZE_MIN && rounded <= SIZE_MAX)) {
+    throw new Error(label + ' 需在 ' + SIZE_MIN + '-' + SIZE_MAX + ' 之间')
+  }
+  return rounded
 }
 
 export type SetConfigArgs = {

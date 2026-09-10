@@ -1,5 +1,13 @@
 import type { Context } from './client-types.ts'
-import { INLINE_REMOTE_CONTRIBUTION, PLUGIN_NAME, ROUTE_PATH } from '../shared.ts'
+import {
+  DEFAULT_MAX_HEIGHT,
+  DEFAULT_MAX_WIDTH,
+  INLINE_REMOTE_CONTRIBUTION,
+  PLUGIN_NAME,
+  ROUTE_PATH,
+  SIZE_MAX,
+  SIZE_MIN,
+} from '../shared.ts'
 import { sessionCwdOf } from './remote.ts'
 import { SpanReplacer } from './span-replacer.ts'
 
@@ -75,24 +83,24 @@ window.__ModuleLoader__.load({
 
     function InlineSettings(props: any) {
       const remote = props.ctx.remote
-      const [maxWidth, setMaxWidth] = React.useState(640)
-      const [maxHeight, setMaxHeight] = React.useState(420)
+      const [maxWidth, setMaxWidth] = React.useState(DEFAULT_MAX_WIDTH)
+      const [maxHeight, setMaxHeight] = React.useState(DEFAULT_MAX_HEIGHT)
       const [status, setStatus] = React.useState<{ kind: string; text: string } | null>(null)
 
       React.useEffect(() => {
         let alive = true
         if (remote?.inlineImages?.getConfig === undefined) {
-          applyImageSizes(640, 420)
+          applyImageSizes(DEFAULT_MAX_WIDTH, DEFAULT_MAX_HEIGHT)
           return () => { alive = false }
         }
         remote.inlineImages.getConfig().then((result: any) => {
           if (!alive) return
           const cfg = unwrapRemoteResult(result, '读取配置失败')
-          setMaxWidth(cfg.maxWidth ?? 640)
-          setMaxHeight(cfg.maxHeight ?? 420)
-          applyImageSizes(cfg.maxWidth ?? 640, cfg.maxHeight ?? 420)
+          setMaxWidth(cfg.maxWidth ?? DEFAULT_MAX_WIDTH)
+          setMaxHeight(cfg.maxHeight ?? DEFAULT_MAX_HEIGHT)
+          applyImageSizes(cfg.maxWidth ?? DEFAULT_MAX_WIDTH, cfg.maxHeight ?? DEFAULT_MAX_HEIGHT)
         }).catch(() => {
-          if (alive) applyImageSizes(640, 420)
+          if (alive) applyImageSizes(DEFAULT_MAX_WIDTH, DEFAULT_MAX_HEIGHT)
         })
         return () => { alive = false }
       }, [remote])
@@ -103,7 +111,10 @@ window.__ModuleLoader__.load({
           return
         }
         setStatus(null)
-        remote.inlineImages.setConfig({ maxWidth: Number(maxWidth) || 640, maxHeight: Number(maxHeight) || 420 }).then((result: any) => {
+        remote.inlineImages.setConfig({
+          maxWidth: Number(maxWidth) || DEFAULT_MAX_WIDTH,
+          maxHeight: Number(maxHeight) || DEFAULT_MAX_HEIGHT,
+        }).then((result: any) => {
           const cfg = unwrapRemoteResult(result, '保存失败')
           setMaxWidth(cfg.maxWidth)
           setMaxHeight(cfg.maxHeight)
@@ -117,15 +128,15 @@ window.__ModuleLoader__.load({
       const inputStyle: any = { width: 70, padding: '4px 8px', marginRight: 4 }
       const btnStyle: any = { padding: '6px 14px', cursor: 'pointer' }
 
-      return el('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 } },
+      return el('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, maxWidth: DEFAULT_MAX_WIDTH } },
         el('div', { style: { fontSize: 12, opacity: 0.7, lineHeight: 1.5 } },
           'LLM 回复中写出的 ![路径](路径) 形式图片引用 (支持绝对路径或相对会话工作目录的相对路径) 会在前端渲染成图片, 会话内容保持原样. 可在此调整正文图片的最大显示尺寸; 点击正文图片可放大查看原图. 支持格式: png/jpg/jpeg/webp/gif/svg/avif/bmp/ico.',
         ),
         el('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
           el('span', { style: { fontSize: 13 } }, '正文图片最大尺寸:'),
-          el('input', { type: 'number', min: 64, max: 2400, value: maxWidth, title: '宽度 px', onChange: (e: any) => setMaxWidth(e.target.value), style: inputStyle }),
+          el('input', { type: 'number', min: SIZE_MIN, max: SIZE_MAX, value: maxWidth, title: '宽度 px', onChange: (e: any) => setMaxWidth(e.target.value), style: inputStyle }),
           el('span', null, 'x'),
-          el('input', { type: 'number', min: 64, max: 2400, value: maxHeight, title: '高度 px', onChange: (e: any) => setMaxHeight(e.target.value), style: inputStyle }),
+          el('input', { type: 'number', min: SIZE_MIN, max: SIZE_MAX, value: maxHeight, title: '高度 px', onChange: (e: any) => setMaxHeight(e.target.value), style: inputStyle }),
           el('button', { style: btnStyle, onClick: save }, '应用'),
           status ? el('span', { style: { fontSize: 12, color: status.kind === 'ok' ? '#2e9e5b' : '#d64545' } }, status.text) : null,
         ),
