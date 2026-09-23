@@ -85,7 +85,8 @@ function parseResolveImageArgs(value: unknown): ResolveImageArgs {
 }
 
 function strictCodec(typeSymbol: string, parse: (value: unknown) => unknown) {
-  return { mode: 'strict' as const, typeSymbol, schema: { parse } }
+  const schema = { parse }
+  return { mode: 'strict' as const, typeSymbol, create: () => schema }
 }
 
 const configCodec = strictCodec('dsh-inline-images#Config', parseConfig)

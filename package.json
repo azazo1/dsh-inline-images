@@ -29,7 +29,7 @@
     "check": "node build.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.1.7-rc.1",
     "esbuild": "^0.28.1"
   },
   "dependencies": {
