@@ -1,32 +1,28 @@
 /**
  * dsh-inline-images host: 对话显示图片.
  *  - 图片回环路由 /plugins/dsh-inline-images/image?t=<token>&p=<绝对路径> (与 Web 页面同源).
- *  - 宽高写入 settings 命名空间 dsh-inline-images; token 仍持久化到凭证存储 (INLINE_IMAGE_TOKEN).
+ *  - 宽高写在 profile 条目 dsh-inline-images 的 volatile Config 里; token 仍持久化到凭证存储 (INLINE_IMAGE_TOKEN).
  *  - 不改写模型输出: 会话日志只保存模型原始的 ![路径](路径) 文本, 零污染.
  *  - InlineImagesRuntime.resolveImage: 供前端把 MarkdownText 降级文本替换为授权 URL;
  *    相对路径按调用方传入的会话工作目录解析.
  *  - systemPrompt section: 指引模型用 ![路径](路径) 附图.
- *  - InlineImagesRuntime: Typert Remote 服务 (getConfig / setConfig / resolveImage).
+ *  - InlineImagesRuntime: Typert Remote 服务 (resolveImage).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { InlineImagesSettingsSchema, type SettingsOwner } from './config.ts'
+import { Config } from './config.ts'
 import {
-  clampImageSize,
-  DEFAULT_MAX_HEIGHT,
-  DEFAULT_MAX_WIDTH,
-  IMAGE_FORMATS,
   INLINE_MANIFEST,
   PLUGIN_NAME,
   ROUTE_PATH,
-  SETTINGS_NAMESPACE,
   type ResolveImageArgs,
   type ResolveImageResult,
-  type SetConfigArgs,
 } from './shared.ts'
+
+export { Config }
 
 export const name = PLUGIN_NAME
 export const inject = ['fs', 'webServer']
@@ -69,7 +65,6 @@ export class InlineImagesRuntime extends TypertRemoteService {
   private readonly fs: Context['fs'] | undefined
   private readonly webServer: { port: number } | undefined
   private tokenPromise: Promise<string> | undefined
-  private settingsOwner: SettingsOwner | undefined
   /** apply 注入, 与图片路由共用同一 getToken, 避免 credentials 未注入时签发失败. */
   tokenSource: () => Promise<string> = async () => {
     throw new Error('token source unset')
@@ -79,11 +74,6 @@ export class InlineImagesRuntime extends TypertRemoteService {
     super(ctx, 'inlineImages')
     this.fs = ctx.get('fs')
     this.webServer = ctx.get('webServer')
-  }
-
-  /** 由 apply 在 settings 注入回调里挂上命名空间 owner. */
-  attachSettings(owner: SettingsOwner): void {
-    this.settingsOwner = owner
   }
 
   /** 取回环 token (惰性初始化, 与 apply 内共享凭证存储). */
@@ -105,31 +95,6 @@ export class InlineImagesRuntime extends TypertRemoteService {
       })()
     }
     return this.tokenPromise
-  }
-
-  async getConfig() {
-    const stored = this.settingsOwner?.get()
-    return {
-      maxWidth: stored?.maxWidth ?? DEFAULT_MAX_WIDTH,
-      maxHeight: stored?.maxHeight ?? DEFAULT_MAX_HEIGHT,
-      formats: [...IMAGE_FORMATS],
-    }
-  }
-
-  async setConfig(args: SetConfigArgs) {
-    const owner = this.settingsOwner
-    if (owner === undefined) throw new Error('设置服务尚未就绪, 请稍后重试')
-    const patch: { maxWidth?: number; maxHeight?: number } = {}
-    if (typeof args.maxWidth === 'number') patch.maxWidth = clampImageSize(args.maxWidth, '宽度')
-    if (typeof args.maxHeight === 'number') patch.maxHeight = clampImageSize(args.maxHeight, '高度')
-    if (patch.maxWidth !== undefined || patch.maxHeight !== undefined) {
-      await owner.update(patch)
-    }
-    const next = await this.getConfig()
-    this.ctx.logger(PLUGIN_NAME).info(
-      '已保存正文图片最大尺寸 ' + next.maxWidth + 'x' + next.maxHeight,
-    )
-    return next
   }
 
   /**
@@ -219,10 +184,6 @@ export function apply(ctx: Context): void {
 
   const runtime = new InlineImagesRuntime(ctx)
   runtime.tokenSource = getToken
-  ctx.inject(['settings'], (settingsCtx) => {
-    runtime.attachSettings(settingsCtx.settings.register(SETTINGS_NAMESPACE, InlineImagesSettingsSchema))
-    logger.info('已注册 settings 命名空间 ' + SETTINGS_NAMESPACE)
-  })
   if (typert !== undefined) typert.register(INLINE_MANIFEST)
   // 路由与 resolveImage 共用同一 token 来源: runtime 的惰性初始化落在凭证存储中.
   runtime.ensureToken(

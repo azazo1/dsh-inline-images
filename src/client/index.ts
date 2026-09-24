@@ -5,18 +5,19 @@ import {
   INLINE_REMOTE_CONTRIBUTION,
   PLUGIN_NAME,
   ROUTE_PATH,
-  SIZE_MAX,
-  SIZE_MIN,
 } from '../shared.ts'
+import { en, NS, zh } from './locales.ts'
+import { createSettingsCard, InlineImagesSettingsCard } from './settings-card.ts'
 import { sessionCwdOf } from './remote.ts'
 import { SpanReplacer } from './span-replacer.ts'
 
 /**
- * dsh-inline-images client (dsh 0.1.2-rc.1):
+ * dsh-inline-images client:
  *  - 前端替换: 扫描 MarkdownText 因 URL 白名单被拒而降级的图片路径 span,
  *    经 host resolveImage 授权后替换为同源回环 <img>; 会话日志保持模型原始文本.
  *  - shell.overlay 灯箱: 点击替换出的图片放大; 点背景或 Esc 关闭.
- *  - 设置 -> 内联图片 (ctx.remote.inlineImages) 控制正文图片最大尺寸.
+ *  - 插件页配置卡片 (plugins.bundle.config): 正文图片最大宽高经 ctx.configForms 读写,
+ *    Host 侧 Config 的 volatile 字段是唯一来源, 保存落在 profile 的 patch 层.
  */
 declare const window: {
   __ModuleLoader__: {
@@ -31,6 +32,13 @@ window.__ModuleLoader__.load({
   id: PLUGIN_NAME,
   factory: (req) => {
     const React = req('react')
+    // 官方控件与表单模型经 module loader 的 require 取, 不把宿主包打进本 bundle.
+    const primitives = req('@deepseek-ai/dsh-client-ui-primitives')
+    const SettingsCard = createSettingsCard({
+      React,
+      SettingsForm: primitives.SettingsForm,
+      SettingsValueField: primitives.SettingsValueField,
+    })
 
     function el(type: any, props: any, ...children: any[]) {
       return React.createElement.apply(null, [type, props].concat(children))
@@ -59,6 +67,9 @@ window.__ModuleLoader__.load({
       return value
     }
 
+    /** 灯箱关闭按钮的文案: 挂载时按当前字典覆盖. */
+    let lightboxCloseLabel = '关闭 (Esc)'
+
     function ImageLightbox() {
       const current = useStore({ subscribe: lightboxStore.subscribe.bind(lightboxStore), get: () => lightboxStore.current })
       if (current === null) return null
@@ -68,78 +79,7 @@ window.__ModuleLoader__.load({
       },
         el('img', { src: current.src, alt: current.name, style: { maxWidth: '92vw', maxHeight: '78vh', objectFit: 'contain', borderRadius: 6 }, onClick: (e: any) => e.stopPropagation() }),
         el('div', { style: { color: '#fff', fontSize: 13, opacity: 0.9 } }, current.name),
-        el('button', { style: { padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(128,128,128,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }, onClick: (e: any) => { e.stopPropagation(); lightboxStore.close() } }, '关闭 (Esc)'),
-      )
-    }
-
-    function unwrapRemoteResult(result: any, fallbackMessage: string): any {
-      if (result && typeof result === 'object' && 'ok' in result) {
-        if (result.ok === true) return result.value
-        const err = result.error
-        throw new Error(typeof err?.message === 'string' ? err.message : fallbackMessage)
-      }
-      return result
-    }
-
-    function InlineSettings(props: any) {
-      const remote = props.ctx.remote
-      const [maxWidth, setMaxWidth] = React.useState(DEFAULT_MAX_WIDTH)
-      const [maxHeight, setMaxHeight] = React.useState(DEFAULT_MAX_HEIGHT)
-      const [status, setStatus] = React.useState<{ kind: string; text: string } | null>(null)
-
-      React.useEffect(() => {
-        let alive = true
-        if (remote?.inlineImages?.getConfig === undefined) {
-          applyImageSizes(DEFAULT_MAX_WIDTH, DEFAULT_MAX_HEIGHT)
-          return () => { alive = false }
-        }
-        remote.inlineImages.getConfig().then((result: any) => {
-          if (!alive) return
-          const cfg = unwrapRemoteResult(result, '读取配置失败')
-          setMaxWidth(cfg.maxWidth ?? DEFAULT_MAX_WIDTH)
-          setMaxHeight(cfg.maxHeight ?? DEFAULT_MAX_HEIGHT)
-          applyImageSizes(cfg.maxWidth ?? DEFAULT_MAX_WIDTH, cfg.maxHeight ?? DEFAULT_MAX_HEIGHT)
-        }).catch(() => {
-          if (alive) applyImageSizes(DEFAULT_MAX_WIDTH, DEFAULT_MAX_HEIGHT)
-        })
-        return () => { alive = false }
-      }, [remote])
-
-      const save = () => {
-        if (remote?.inlineImages?.setConfig === undefined) {
-          setStatus({ kind: 'err', text: 'Remote 端点未挂载, 无法保存' })
-          return
-        }
-        setStatus(null)
-        remote.inlineImages.setConfig({
-          maxWidth: Number(maxWidth) || DEFAULT_MAX_WIDTH,
-          maxHeight: Number(maxHeight) || DEFAULT_MAX_HEIGHT,
-        }).then((result: any) => {
-          const cfg = unwrapRemoteResult(result, '保存失败')
-          setMaxWidth(cfg.maxWidth)
-          setMaxHeight(cfg.maxHeight)
-          applyImageSizes(cfg.maxWidth, cfg.maxHeight)
-          setStatus({ kind: 'ok', text: '正文图片最大尺寸已更新为 ' + cfg.maxWidth + 'x' + cfg.maxHeight })
-        }).catch((err: any) => {
-          setStatus({ kind: 'err', text: '保存失败: ' + String(err?.message ?? err) })
-        })
-      }
-
-      const inputStyle: any = { width: 70, padding: '4px 8px', marginRight: 4 }
-      const btnStyle: any = { padding: '6px 14px', cursor: 'pointer' }
-
-      return el('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, maxWidth: DEFAULT_MAX_WIDTH } },
-        el('div', { style: { fontSize: 12, opacity: 0.7, lineHeight: 1.5 } },
-          'LLM 回复中写出的 ![路径](路径) 形式图片引用 (支持绝对路径或相对会话工作目录的相对路径) 会在前端渲染成图片, 会话内容保持原样. 可在此调整正文图片的最大显示尺寸; 点击正文图片可放大查看原图. 支持格式: png/jpg/jpeg/webp/gif/svg/avif/bmp/ico.',
-        ),
-        el('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-          el('span', { style: { fontSize: 13 } }, '正文图片最大尺寸:'),
-          el('input', { type: 'number', min: SIZE_MIN, max: SIZE_MAX, value: maxWidth, title: '宽度 px', onChange: (e: any) => setMaxWidth(e.target.value), style: inputStyle }),
-          el('span', null, 'x'),
-          el('input', { type: 'number', min: SIZE_MIN, max: SIZE_MAX, value: maxHeight, title: '高度 px', onChange: (e: any) => setMaxHeight(e.target.value), style: inputStyle }),
-          el('button', { style: btnStyle, onClick: save }, '应用'),
-          status ? el('span', { style: { fontSize: 12, color: status.kind === 'ok' ? '#2e9e5b' : '#d64545' } }, status.text) : null,
-        ),
+        el('button', { style: { padding: '6px 14px', borderRadius: 6, border: '1px solid rgba(128,128,128,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }, onClick: (e: any) => { e.stopPropagation(); lightboxStore.close() } }, lightboxCloseLabel),
       )
     }
 
@@ -174,16 +114,45 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function applyMounted(scope: Context, sessions: Context['sessions'], inlineImages: any): void {
+    /** 与 remote 无关的界面: 灯箱、字典、插件页配置卡片与尺寸样式. */
+    function setupSettings(scope: Context): void {
       scope.slots.inject('shell.overlay', () => scope.slots.register(
         { name: 'shell.overlay', id: 'inline-images-lightbox', order: 100, label: '图片灯箱' },
         () => React.createElement(ImageLightbox, null),
       ))
-      scope.slots.inject('settings.section', () => scope.slots.register(
-        { name: 'settings.section', id: 'inline-images', order: 35, label: '内联图片' },
-        (props: any) => React.createElement(InlineSettings, { ...props, ctx: { ...scope, remote: { inlineImages } } }),
-      ))
 
+      const t = scope.locale.bind(NS)
+      lightboxCloseLabel = t('closeLightbox')
+      scope.effect(() => scope.locale.register(NS, { zh, en }), 'dsh-inline-images: dictionaries')
+      const card = new InlineImagesSettingsCard(
+        scope.configForms.get(PLUGIN_NAME),
+        primitives.SettingsFormModel,
+        primitives.settingsNumberField,
+      )
+      scope.effect(() => () => { card.dispose() }, 'dsh-inline-images: settings form')
+      scope.effect(() => scope.configForms.whileServed([PLUGIN_NAME], () => scope.slots.inject(
+        'plugins.bundle.config',
+        () => scope.slots.register({
+          name: 'plugins.bundle.config',
+          key: PLUGIN_NAME,
+          locale: NS,
+          inject: () => card.inject(),
+        }, SettingsCard),
+      )), 'dsh-inline-images: plugins page card')
+
+      // 尺寸跟随配置: 挂载读一次, 之后任何页面写入都实时改样式.
+      const applyFromForm = () => {
+        const value = (scope.configForms.get(PLUGIN_NAME).getSnapshot().value ?? {}) as { maxWidth?: number; maxHeight?: number }
+        applyImageSizes(
+          typeof value.maxWidth === 'number' ? value.maxWidth : DEFAULT_MAX_WIDTH,
+          typeof value.maxHeight === 'number' ? value.maxHeight : DEFAULT_MAX_HEIGHT,
+        )
+      }
+      applyFromForm()
+      scope.effect(() => scope.configForms.get(PLUGIN_NAME).subscribe(applyFromForm), 'dsh-inline-images: image sizes')
+    }
+
+    function applyMounted(scope: Context, sessions: Context['sessions'], inlineImages: any): void {
       if (typeof document === 'undefined') return
       const replacer = new SpanReplacer(
         (args) => inlineImages.resolveImage(args),
@@ -220,6 +189,8 @@ window.__ModuleLoader__.load({
     }
 
     async function apply(ctx: Context): Promise<void> {
+      // 配置卡片与尺寸样式不依赖 remote, 先挂上.
+      setupSettings(ctx)
       await ctx.remote.$mount(INLINE_REMOTE_CONTRIBUTION)
       // 不要用 ctx.remote.inlineImages (未 inject 会抛错), 也不要 ctx.inject 等这个 key (外部插件 fiber 可能永远等不到).
       const inlineImages = typeof ctx.get === 'function' ? ctx.get('remote.inlineImages') : undefined
@@ -229,7 +200,7 @@ window.__ModuleLoader__.load({
 
     return {
       name: PLUGIN_NAME,
-      inject: ['slots', 'remote', 'sessions'],
+      inject: ['slots', 'remote', 'sessions', 'locale', 'configForms'],
       apply,
     }
   },

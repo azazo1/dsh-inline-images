@@ -63,6 +63,7 @@ function verifyClientBundle() {
     throw new Error('client registration 缺少 factory')
   }
 
+  const declared = JSON.parse(readFileSync('package.json', 'utf8')).dsh.client.inject
   const required = []
   const plugin = registration.factory((id) => {
     required.push(id)
@@ -73,15 +74,37 @@ function verifyClientBundle() {
         useEffect() {},
       }
     }
+    if (declared.includes(id)) {
+      // 官方包的替身: factory 只读取, 真实实现由 module loader 提供.
+      return {
+        SettingsForm() { return null },
+        SettingsValueField() { return null },
+        SettingsFormModel: class {
+          bind() { return {} }
+          shell() { return {} }
+          field() { return {} }
+          actions() { return {} }
+          dispose() {}
+        },
+        settingsNumberField() { return {} },
+      }
+    }
     throw new Error('unexpected require: ' + id)
   })
   if (!required.includes('react')) {
     throw new Error('factory 应通过 require("react") 获取 React')
   }
+  for (const id of required) {
+    if (id !== 'react' && !declared.includes(id)) {
+      throw new Error('运行期 require 了未在 dsh.client.inject 声明的包: ' + id)
+    }
+  }
   if (typeof plugin?.apply !== 'function') {
     throw new Error('factory 必须返回带 apply 的插件对象')
   }
-  if (!Array.isArray(plugin.inject) || !plugin.inject.includes('slots') || !plugin.inject.includes('remote')) {
-    throw new Error('factory 返回的 inject 必须包含 slots 和 remote')
+  for (const name of ['slots', 'remote', 'sessions', 'locale', 'configForms']) {
+    if (!Array.isArray(plugin.inject) || !plugin.inject.includes(name)) {
+      throw new Error('factory 返回的 inject 必须包含 ' + name)
+    }
   }
 }
