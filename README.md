@@ -2,7 +2,7 @@
 
 让 DeepSeek Harness 的对话**直接显示本地图片**: LLM 回复中输出 `![路径](路径)` 形式的图片引用 (截图, 生成图等), 会在**消息正文里**渲染成图片 -- 不再只是一串看不到的路径文本.
 
-兼容 DSH `0.1.2-rc.1` (Web Client 使用 `window.__ModuleLoader__.load` 注册).
+兼容 DSH `0.1.7-rc.2` (Web Client 使用 `window.__ModuleLoader__.load` 注册).
 
 ![示例](assets/screenshots/demo.png)
 
@@ -22,10 +22,21 @@
 ```sh
 just install
 just build
+```
+
+Web 端装进 `web` profile:
+
+```sh
 dsh plugin --profile web add ./dsh-inline-images
 ```
 
-修改 Client bundle 或 `dsh.client` 声明后需要重启 `dsh web`, 然后硬刷新浏览器.
+装完重启 `dsh web`, 硬刷新浏览器 (改过 Client bundle 或 `dsh.client` 声明时必须).
+
+桌面端装进 `desktop` profile. 它由 Electron 应用独占管理, `dsh plugin` 会拒绝 `--profile desktop`, 所以要用应用内的插件管理器: 在插件页的安装入口填上面命令里对应的包名或本地目录. 装上后重启应用, 窗口刷新一次.
+
+引擎版本线要求 `@deepseek-ai/dsh-*` 不低于 `0.1.7-rc.2`, 且仍在 `0.1.x` 上. 更早的引擎线装不上这个版本.
+
+web 与 desktop 两个 profile 跑的是同一套 Web 应用, 桌面端只是多起一个 Host 子进程并给 `<html>` 打上平台标记, 所以同一份包在两边通用, 不需要分别构建.
 
 安装后可确认:
 
